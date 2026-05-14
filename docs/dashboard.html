@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Eye Cancer ML · Results Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Fraunces:ital,wght@0,300;0,600;0,700;1,300&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #0e0f13;
+    --surface:  #15171e;
+    --border:   #252830;
+    --text:     #e8e9ef;
+    --muted:    #6b6f7e;
+    --accent1:  #7ee8c2;   /* teal — best model */
+    --accent2:  #f0a868;   /* amber — ensembles */
+    --accent3:  #7aa4d8;   /* blue — base models */
+    --accent4:  #c97db8;   /* mauve — baseline */
+    --danger:   #e07070;
+    --font-mono: 'DM Mono', monospace;
+    --font-disp: 'Fraunces', serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 40px 48px 32px;
+    position: relative;
+    overflow: hidden;
+  }
+  header::before {
+    content: '';
+    position: absolute;
+    top: -60px; right: -80px;
+    width: 400px; height: 400px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(126,232,194,0.06) 0%, transparent 70%);
+    pointer-events: none;
+  }
+  .eyebrow {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent1);
+    margin-bottom: 10px;
+  }
+  h1 {
+    font-family: var(--font-disp);
+    font-size: clamp(26px, 4vw, 42px);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    margin-bottom: 12px;
+  }
+  h1 em {
+    font-style: italic;
+    font-weight: 300;
+    color: var(--accent1);
+  }
+  .subtitle {
+    color: var(--muted);
+    font-size: 12px;
+    max-width: 600px;
+  }
+  .meta-row {
+    display: flex;
+    gap: 24px;
+    margin-top: 20px;
+    flex-wrap: wrap;
+  }
+  .meta-pill {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 12px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .meta-pill span { color: var(--text); }
+
+  /* ── Main layout ── */
+  main { padding: 40px 48px; max-width: 1400px; }
+
+  section { margin-bottom: 56px; }
+  .section-label {
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    margin-bottom: 24px;
+  }
+
+  /* ── KPI row ── */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+  .kpi {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 22px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .kpi:hover { border-color: var(--accent1); }
+  .kpi::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--kpi-color, var(--accent3));
+  }
+  .kpi-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+  .kpi-value { font-family: var(--font-disp); font-size: 32px; font-weight: 700; color: var(--kpi-color, var(--text)); line-height: 1; }
+  .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  /* ── Bar chart ── */
+  .chart-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 28px 28px 20px;
+  }
+  .chart-title {
+    font-family: var(--font-disp);
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .chart-desc { font-size: 11px; color: var(--muted); margin-bottom: 28px; }
+
+  .bar-chart { display: flex; flex-direction: column; gap: 10px; }
+  .bar-row { display: grid; grid-template-columns: 200px 1fr 56px; align-items: center; gap: 14px; }
+  .bar-name { font-size: 11px; color: var(--muted); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar-track { background: #1c1e26; border-radius: 3px; height: 22px; position: relative; overflow: hidden; }
+  .bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 1s cubic-bezier(0.23, 1, 0.32, 1);
+    width: 0;
+    position: relative;
+  }
+  .bar-fill::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent 60%, rgba(255,255,255,0.08));
+  }
+  .bar-baseline {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 1px;
+    background: rgba(255,255,255,0.15);
+    z-index: 2;
+  }
+  .bar-val { font-size: 12px; font-weight: 500; color: var(--text); }
+
+  /* ── Dataset grid ── */
+  .data-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+  }
+  .data-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+  }
+  .data-card h3 {
+    font-family: var(--font-disp);
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 14px;
+    color: var(--accent1);
+  }
+  .dist-bar-wrap { display: flex; flex-direction: column; gap: 8px; }
+  .dist-row { display: grid; grid-template-columns: 110px 1fr 38px; align-items: center; gap: 8px; }
+  .dist-label { font-size: 11px; color: var(--muted); }
+  .dist-track { background: #1c1e26; border-radius: 2px; height: 12px; }
+  .dist-fill { height: 100%; border-radius: 2px; transition: width 1.2s cubic-bezier(0.23,1,0.32,1); width: 0; }
+  .dist-pct { font-size: 11px; color: var(--text); text-align: right; }
+
+  /* ── Pipeline steps ── */
+  .pipeline {
+    display: flex;
+    gap: 0;
+    flex-wrap: wrap;
+    position: relative;
+  }
+  .pipe-step {
+    flex: 1;
+    min-width: 140px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-right: none;
+    padding: 16px 18px;
+    position: relative;
+    transition: background 0.2s;
+  }
+  .pipe-step:last-child { border-right: 1px solid var(--border); border-radius: 0 8px 8px 0; }
+  .pipe-step:first-child { border-radius: 8px 0 0 8px; }
+  .pipe-step:hover { background: #1c1e26; }
+  .pipe-step::after {
+    content: '→';
+    position: absolute;
+    right: -12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--muted);
+    font-size: 14px;
+    z-index: 2;
+  }
+  .pipe-step:last-child::after { display: none; }
+  .pipe-num { font-size: 10px; color: var(--accent1); letter-spacing: 0.1em; margin-bottom: 5px; }
+  .pipe-name { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 3px; }
+  .pipe-detail { font-size: 10px; color: var(--muted); line-height: 1.4; }
+
+  /* ── Model details table ── */
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); padding: 8px 14px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  tr.best-row td { background: rgba(126, 232, 194, 0.04); }
+  tr.best-row td:first-child { border-left: 2px solid var(--accent1); }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px; border-radius: 3px;
+    font-size: 10px; font-weight: 500;
+  }
+  .badge-best { background: rgba(126,232,194,0.12); color: var(--accent1); }
+  .badge-ens  { background: rgba(240,168,104,0.12); color: var(--accent2); }
+  .badge-base { background: rgba(122,164,216,0.12); color: var(--accent3); }
+
+  /* ── Limitation callout ── */
+  .callout {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent2);
+    border-radius: 0 8px 8px 0;
+    padding: 18px 22px;
+    margin-top: 16px;
+  }
+  .callout-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent2); margin-bottom: 6px; }
+  .callout p { font-size: 12px; color: var(--muted); line-height: 1.7; }
+
+  /* ── Footer ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 28px 48px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  footer a { color: var(--accent1); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  @media (max-width: 700px) {
+    header, main, footer { padding-left: 20px; padding-right: 20px; }
+    .bar-row { grid-template-columns: 120px 1fr 48px; }
+    .pipe-step { min-width: 100%; border-right: 1px solid var(--border); border-bottom: none; border-radius: 0; }
+    .pipe-step:first-child { border-radius: 8px 8px 0 0; }
+    .pipe-step:last-child  { border-radius: 0 0 8px 8px; border-bottom: 1px solid var(--border); }
+    .pipe-step::after { content: '↓'; right: auto; left: 50%; top: auto; bottom: -13px; transform: translateX(-50%); }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">DA5030 · Northeastern University · Summer 2025</div>
+  <h1>Eye Cancer Outcome Prediction<br><em>Ensemble Machine Learning</em></h1>
+  <p class="subtitle">Multiclass classification pipeline predicting Active · In Remission · Deceased status across 5,000 eye cancer patient records using R.</p>
+  <div class="meta-row">
+    <div class="meta-pill">Author <span>Sucharita Roy</span></div>
+    <div class="meta-pill">Language <span>R 4.3</span></div>
+    <div class="meta-pill">Models <span>7 (4 base + 3 ensemble)</span></div>
+    <div class="meta-pill">Primary Metric <span>Macro-F1</span></div>
+    <div class="meta-pill">Best F1 <span>0.363</span></div>
+  </div>
+</header>
+
+<main>
+
+  <!-- KPIs -->
+  <section>
+    <div class="section-label">Key Numbers</div>
+    <div class="kpi-row">
+      <div class="kpi" style="--kpi-color: var(--accent3)">
+        <div class="kpi-label">Patients</div>
+        <div class="kpi-value">5K</div>
+        <div class="kpi-sub">5,000 records · 16 features</div>
+      </div>
+      <div class="kpi" style="--kpi-color: var(--accent3)">
+        <div class="kpi-label">Outcome Classes</div>
+        <div class="kpi-value">3</div>
+        <div class="kpi-sub">Active · In Remission · Deceased</div>
+      </div>
+      <div class="kpi" style="--kpi-color: var(--accent2)">
+        <div class="kpi-label">Base Learners</div>
+        <div class="kpi-value">4</div>
+        <div class="kpi-sub">LR · kNN · RF · XGBoost</div>
+      </div>
+      <div class="kpi" style="--kpi-color: var(--accent1)">
+        <div class="kpi-label">Best Macro-F1</div>
+        <div class="kpi-value">0.363</div>
+        <div class="kpi-sub">Stacked meta-learner</div>
+      </div>
+      <div class="kpi" style="--kpi-color: var(--accent4)">
+        <div class="kpi-label">Random Baseline</div>
+        <div class="kpi-value">0.333</div>
+        <div class="kpi-sub">3-class balanced chance</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Model comparison chart -->
+  <section>
+    <div class="section-label">Model Performance · Macro-averaged F1 (test set)</div>
+    <div class="chart-wrap">
+      <div class="chart-title">All Models vs. Random Baseline</div>
+      <div class="chart-desc">Dashed line = balanced 3-class random baseline (0.333). Macro-F1 weights all classes equally — critical for avoiding misleading accuracy on this balanced dataset.</div>
+      <div class="bar-chart" id="barChart"></div>
+    </div>
+  </section>
+
+  <!-- Pipeline -->
+  <section>
+    <div class="section-label">Pipeline · CRISP-DM</div>
+    <div class="pipeline">
+      <div class="pipe-step">
+        <div class="pipe-num">01</div>
+        <div class="pipe-name">Data Load & Clean</div>
+        <div class="pipe-detail">Drop Patient_ID, Date<br>Cast binary flags as factors<br>Normalize outcome levels</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">02</div>
+        <div class="pipe-name">EDA</div>
+        <div class="pipe-detail">Pearson correlation<br>Histograms<br>Chi-squared vs outcome</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">03</div>
+        <div class="pipe-name">Feature Engineering</div>
+        <div class="pipe-detail">PCA → PC1, PC2<br>LongSurvival flag<br>AgeGroup bins<br>Age×Survival interaction</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">04</div>
+        <div class="pipe-name">Modeling</div>
+        <div class="pipe-detail">70/30 stratified split<br>5-fold CV, macro-F1<br>Per-model preprocessing</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">05</div>
+        <div class="pipe-name">Ensembles</div>
+        <div class="pipe-detail">Majority-vote (4 models)<br>Stacked meta-learner<br>Multinomial logit</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">06</div>
+        <div class="pipe-name">Evaluation</div>
+        <div class="pipe-detail">Macro-F1 (primary)<br>Confusion matrix<br>Per-class sensitivity</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Dataset distributions -->
+  <section>
+    <div class="section-label">Dataset · Feature Distributions</div>
+    <div class="data-grid">
+
+      <div class="data-card">
+        <h3>Outcome Classes (target)</h3>
+        <div class="dist-bar-wrap" id="distOutcome"></div>
+      </div>
+
+      <div class="data-card">
+        <h3>Cancer Type</h3>
+        <div class="dist-bar-wrap" id="distCancer"></div>
+      </div>
+
+      <div class="data-card">
+        <h3>Stage at Diagnosis</h3>
+        <div class="dist-bar-wrap" id="distStage"></div>
+      </div>
+
+      <div class="data-card">
+        <h3>Treatment Type</h3>
+        <div class="dist-bar-wrap" id="distTreatment"></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Full results table -->
+  <section>
+    <div class="section-label">Detailed Results Table</div>
+    <div class="chart-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Type</th>
+            <th>Key Hyperparameters</th>
+            <th>Macro-F1</th>
+            <th>vs Baseline</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Logistic Regression (glmnet)</td>
+            <td><span class="badge badge-base">Base</span></td>
+            <td>α=0 (ridge), λ≈0.022</td>
+            <td>0.510</td>
+            <td style="color:var(--accent1)">+0.177</td>
+          </tr>
+          <tr>
+            <td>Bagged LR</td>
+            <td><span class="badge badge-base">Base</span></td>
+            <td>30 bootstraps, majority vote</td>
+            <td>~0.51</td>
+            <td style="color:var(--accent1)">+0.177</td>
+          </tr>
+          <tr>
+            <td>kNN (bagged)</td>
+            <td><span class="badge badge-base">Base</span></td>
+            <td>k=15, 30 bootstraps</td>
+            <td>0.309</td>
+            <td style="color:var(--danger)">−0.024</td>
+          </tr>
+          <tr>
+            <td>Random Forest</td>
+            <td><span class="badge badge-base">Base</span></td>
+            <td>mtry=3, 5-fold CV tuned</td>
+            <td>0.312</td>
+            <td style="color:var(--danger)">−0.021</td>
+          </tr>
+          <tr>
+            <td>XGBoost</td>
+            <td><span class="badge badge-base">Base</span></td>
+            <td>nrounds=100, depth=6, η=0.05</td>
+            <td>0.328</td>
+            <td style="color:var(--danger)">−0.005</td>
+          </tr>
+          <tr>
+            <td>Voting Ensemble</td>
+            <td><span class="badge badge-ens">Ensemble</span></td>
+            <td>4-model majority vote</td>
+            <td>0.313</td>
+            <td style="color:var(--danger)">−0.020</td>
+          </tr>
+          <tr class="best-row">
+            <td><strong>Stacked Meta-Learner</strong> ★</td>
+            <td><span class="badge badge-best">Best</span></td>
+            <td>Multinomial logit on base predictions</td>
+            <td><strong>0.363</strong></td>
+            <td style="color:var(--accent1)"><strong>+0.030</strong></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <div class="callout-title">Interpretation note</div>
+      <p>F1 scores in the 0.31–0.36 range are expected for this dataset. With three near-equal classes (~33% each), the random baseline is 0.333. The available features — demographics, treatment type, laterality — do not have strong causal relationships with clinical outcome. The pipeline's value lies in its methodological rigor, not the absolute metric. Real-world performance would require richer molecular and longitudinal features (tumor histology, BRAF status, longitudinal imaging).</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div>Sucharita Roy · M.S. Bioinformatics, Northeastern University · 2025</div>
+  <div>
+    <a href="https://linkedin.com/in/sucharita-roy" target="_blank">LinkedIn</a> ·
+    <a href="https://github.com/sucharita-roy" target="_blank">GitHub</a>
+  </div>
+</footer>
+
+<script>
+// ── Bar chart ──
+const models = [
+  { name: "Logistic Regression",    f1: 0.510, type: "base" },
+  { name: "Bagged LR",              f1: 0.510, type: "base" },
+  { name: "kNN (k=15, bagged)",     f1: 0.309, type: "base" },
+  { name: "Random Forest",          f1: 0.312, type: "base" },
+  { name: "XGBoost",                f1: 0.328, type: "base" },
+  { name: "Voting Ensemble",        f1: 0.313, type: "ensemble" },
+  { name: "Stacked Meta-Learner ★", f1: 0.363, type: "best" },
+];
+const colorMap = { base: "#7aa4d8", ensemble: "#f0a868", best: "#7ee8c2" };
+const maxF1 = 0.6;
+const baselinePos = (0.333 / maxF1) * 100;
+
+const bc = document.getElementById("barChart");
+models.forEach(m => {
+  const pct = (m.f1 / maxF1) * 100;
+  const row = document.createElement("div");
+  row.className = "bar-row";
+  row.innerHTML = `
+    <div class="bar-name" title="${m.name}">${m.name}</div>
+    <div class="bar-track">
+      <div class="bar-baseline" style="left:${baselinePos}%"></div>
+      <div class="bar-fill" data-pct="${pct}" style="background:${colorMap[m.type]}"></div>
+    </div>
+    <div class="bar-val" style="color:${colorMap[m.type]}">${m.f1.toFixed(3)}</div>
+  `;
+  bc.appendChild(row);
+});
+
+// ── Distribution bars ──
+function renderDist(id, items) {
+  const max = Math.max(...items.map(i => i.n));
+  const el = document.getElementById(id);
+  items.forEach(item => {
+    const pct = (item.n / max) * 100;
+    const row = document.createElement("div");
+    row.className = "dist-row";
+    row.innerHTML = `
+      <div class="dist-label">${item.label}</div>
+      <div class="dist-track"><div class="dist-fill" data-pct="${pct}" style="background:#7aa4d8;opacity:0.7"></div></div>
+      <div class="dist-pct">${((item.n/5000)*100).toFixed(1)}%</div>
+    `;
+    el.appendChild(row);
+  });
+}
+
+renderDist("distOutcome", [
+  { label: "Deceased",     n: 1710 },
+  { label: "In Remission", n: 1675 },
+  { label: "Active",       n: 1615 },
+]);
+renderDist("distCancer", [
+  { label: "Melanoma",       n: 1691 },
+  { label: "Retinoblastoma", n: 1672 },
+  { label: "Lymphoma",       n: 1637 },
+]);
+renderDist("distStage", [
+  { label: "Stage II",  n: 1287 },
+  { label: "Stage III", n: 1281 },
+  { label: "Stage IV",  n: 1242 },
+  { label: "Stage I",   n: 1190 },
+]);
+renderDist("distTreatment", [
+  { label: "Surgery",      n: 1679 },
+  { label: "Chemotherapy", n: 1665 },
+  { label: "Radiation",    n: 1656 },
+]);
+
+// ── Animate on load ──
+setTimeout(() => {
+  document.querySelectorAll(".bar-fill[data-pct]").forEach(el => {
+    el.style.width = el.dataset.pct + "%";
+  });
+  document.querySelectorAll(".dist-fill[data-pct]").forEach(el => {
+    el.style.width = el.dataset.pct + "%";
+  });
+}, 300);
+</script>
+</body>
+</html>

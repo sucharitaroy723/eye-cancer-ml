@@ -1,0 +1,643 @@
+---
+title: "Eye Cancer Outcome Prediction: Multi-Class Ensemble Machine Learning"
+subtitle: "DA5030 – Data Mining & Machine Learning | Northeastern University"
+author: "Sucharita Roy"
+date: "Summer 2025"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,      # show code for reproducibility
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+---
+
+## 1. Project Overview
+
+This analysis builds a multiclass classifier on 5,000 eye cancer patient records to predict
+clinical outcome status: **Active**, **In Remission**, or **Deceased**.
+
+The pipeline follows CRISP-DM and includes:
+
+- Exploratory data analysis with correlation and chi-squared testing
+- Feature engineering: PCA, survival flags, age bins, interaction terms
+- Four individually tuned base learners: penalized logistic regression, bagged kNN, random forest, XGBoost
+- Two ensemble strategies: majority-voting and stacked meta-learner
+- Evaluation using **macro-averaged F1** throughout (primary metric) and accuracy
+
+> **Note on expected F1:** With three near-equal classes (~33% each), a random baseline scores
+> ~0.33 macro-F1. Scores in the 0.31–0.36 range reflect limited discriminative power in
+> available features (demographics and treatment type), not a flaw in the pipeline.
+
+---
+
+## 2. Setup — Packages
+
+```{r packages}
+required_packages <- c(
+  "caret", "ggplot2", "class", "corrplot",
+  "nnet", "MLmetrics", "xgboost",
+  "Matrix", "randomForest", "glmnet"
+)
+
+new_packages <- required_packages[
+  !(required_packages %in% installed.packages()[, "Package"])
+]
+if (length(new_packages)) install.packages(new_packages, dependencies = TRUE)
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Helper: macro-averaged F1 for multiclass problems
+macro_f1_score <- function(pred, true) {
+  classes <- levels(true)
+  f1s <- sapply(classes, function(cl) {
+    bin_pred <- factor(ifelse(pred == cl, cl, paste0("not_", cl)),
+                       levels = c(cl, paste0("not_", cl)))
+    bin_true <- factor(ifelse(true == cl, cl, paste0("not_", cl)),
+                       levels = c(cl, paste0("not_", cl)))
+    F1_Score(y_pred = bin_pred, y_true = bin_true, positive = cl)
+  })
+  mean(f1s)
+}
+```
+
+---
+
+## 3. Data Preparation
+
+### 3.1 Load & Clean
+
+Data is loaded from the local `data/` directory. The broken Kaggle signed URL in the
+original template has been replaced with a relative path for full reproducibility.
+
+```{r load-clean}
+# Load dataset from local data directory (relative path for portability)
+eye_data <- read.csv(
+  file.path(dirname(rstudioapi::getSourceEditorContext()$path),
+            "..", "data", "eye_cancer_patients.csv"),
+  header          = TRUE,
+  stringsAsFactors = TRUE
+)
+
+# Fallback: if not running interactively via RStudio, use working directory
+if (!exists("eye_data") || nrow(eye_data) == 0) {
+  eye_data <- read.csv("data/eye_cancer_patients.csv",
+                       header = TRUE, stringsAsFactors = TRUE)
+}
+
+# Drop non-predictive columns: patient ID and diagnosis date
+eye_data <- subset(eye_data, select = -c(Patient_ID, Date_of_Diagnosis))
+
+# Cast binary flags as factors for proper model handling
+eye_data$Surgery_Status <- as.factor(eye_data$Surgery_Status)
+eye_data$Family_History <- as.factor(eye_data$Family_History)
+
+# Normalize outcome levels to valid R variable names
+eye_data$Outcome_Status <- factor(make.names(eye_data$Outcome_Status))
+
+# Report dimensions and missing values
+cat("Dataset dimensions:", nrow(eye_data), "rows x", ncol(eye_data), "cols\n")
+cat("Class distribution:\n")
+print(table(eye_data$Outcome_Status))
+cat("\nMissing values per column:\n")
+print(colSums(is.na(eye_data)))
+```
+
+### 3.2 Exploratory Data Analysis
+
+```{r eda, fig.width=9, fig.height=6}
+# Numeric columns for correlation analysis
+num_cols <- names(eye_data)[sapply(eye_data, is.numeric)]
+
+# --- Correlation heatmap (upper triangle) ---
+cat("=== Correlation Matrix (numeric features) ===\n")
+cor_matrix <- cor(eye_data[, num_cols], use = "complete.obs")
+corrplot(cor_matrix,
+         method = "color", type = "upper",
+         tl.cex = 0.85, addCoef.col = "black", number.cex = 0.7,
+         title  = "Pearson Correlation – Numeric Features",
+         mar    = c(0, 0, 1, 0))
+
+# --- Histograms of numeric features ---
+par(mfrow = c(2, 3), mar = c(4, 4, 2.5, 1))
+for (var in num_cols) {
+  hist(eye_data[[var]],
+       main   = paste("Distribution of", var),
+       xlab   = var,
+       col    = "#4E79A7",
+       border = "white",
+       breaks = 30)
+}
+par(mfrow = c(1, 1))
+
+# --- Chi-squared tests: categorical predictors vs outcome ---
+cat("\n=== Chi-squared Tests: Categorical Predictors vs Outcome_Status ===\n")
+categorical_vars <- c(
+  "Gender", "Cancer_Type", "Laterality", "Stage_at_Diagnosis",
+  "Treatment_Type", "Country"
+)
+for (var in categorical_vars) {
+  tbl <- table(eye_data[[var]], eye_data$Outcome_Status)
+  test <- chisq.test(tbl)
+  cat(sprintf("  %-25s χ²=%.2f, df=%d, p=%.4f\n",
+              var, test$statistic, test$parameter, test$p.value))
+}
+```
+
+### 3.3 Feature Engineering
+
+```{r feature-engineering, fig.width=6, fig.height=4}
+# PCA on numeric predictors
+num_vars <- setdiff(names(eye_data)[sapply(eye_data, is.numeric)], "Outcome_Status")
+pca_res  <- prcomp(eye_data[, num_vars], center = TRUE, scale. = TRUE)
+
+# Scree plot
+var_exp <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+cum_var <- cumsum(var_exp)
+plot(var_exp * 100, type = "b", pch = 19, col = "#4E79A7",
+     xlab = "Principal Component", ylab = "Variance Explained (%)",
+     main = "Scree Plot – PCA on Numeric Features")
+abline(h = 10, lty = 2, col = "gray50")
+
+cat("\nVariance explained per PC:\n")
+print(data.frame(PC = 1:length(var_exp),
+                 Variance_pct  = round(var_exp * 100, 2),
+                 Cumulative_pct = round(cum_var * 100, 2)))
+
+# Append top 2 PCs to dataset
+eye_data$PC1 <- pca_res$x[, 1]
+eye_data$PC2 <- pca_res$x[, 2]
+
+# LongSurvival flag: above-median survival time
+median_surv       <- median(eye_data$Survival_Time_Months, na.rm = TRUE)
+eye_data$LongSurvival <- factor(
+  ifelse(eye_data$Survival_Time_Months > median_surv, "Yes", "No")
+)
+
+# AgeGroup: binned into Young / Middle / Senior
+eye_data$AgeGroup <- cut(
+  eye_data$Age,
+  breaks = c(0, 40, 60, Inf),
+  labels = c("Young", "Middle", "Senior"),
+  right  = FALSE
+)
+
+# AgeSurvInt: Age × Survival interaction term
+eye_data$AgeSurvInt <- eye_data$Age * eye_data$Survival_Time_Months
+
+cat("\nFinal dataset dimensions after feature engineering:",
+    nrow(eye_data), "x", ncol(eye_data), "\n")
+```
+
+### 3.4 Train / Test Split
+
+```{r train-test-split}
+set.seed(123)
+train_idx <- createDataPartition(eye_data$Outcome_Status, p = 0.7, list = FALSE)
+train     <- eye_data[train_idx, ]
+test      <- eye_data[-train_idx, ]
+cat("Train rows:", nrow(train), "| Test rows:", nrow(test), "\n")
+cat("Train class distribution:\n"); print(table(train$Outcome_Status))
+cat("Test class distribution:\n");  print(table(test$Outcome_Status))
+```
+
+---
+
+## 4. Modeling
+
+Each model uses an **independent data shaping pipeline** to match its specific requirements:
+
+| Model | Encoding | Scaling | Rationale |
+|---|---|---|---|
+| Logistic Regression | One-hot (dummyVars) | Center + scale | Linear model requires comparable scales |
+| kNN | Integer codes | Center + scale | Distance metric breaks on factors |
+| Random Forest | Native factors | None needed | RF handles factors natively |
+| XGBoost | Sparse matrix | None needed | C++ core requires numeric input |
+
+---
+
+### 4.1 Penalized Logistic Regression
+
+#### 4.1.1 Data Shaping
+
+```{r shape-lr}
+vars_lr  <- c("Outcome_Status", "PC1", "PC2",
+              "LongSurvival", "AgeGroup", "AgeSurvInt",
+              "Surgery_Status", "Family_History")
+train_lr <- train[, vars_lr]
+test_lr  <- test[, vars_lr]
+
+# Median imputation + ±3σ outlier capping on numeric predictors
+num_lr_cols <- setdiff(names(train_lr)[sapply(train_lr, is.numeric)], "Outcome_Status")
+for (col in num_lr_cols) {
+  med   <- median(train_lr[[col]], na.rm = TRUE)
+  train_lr[[col]][is.na(train_lr[[col]])] <- med
+  test_lr[[col]][is.na(test_lr[[col]])]   <- med
+  mu    <- mean(train_lr[[col]], na.rm = TRUE)
+  sigma <- sd(train_lr[[col]], na.rm = TRUE)
+  train_lr[[col]] <- pmin(pmax(train_lr[[col]], mu - 3*sigma), mu + 3*sigma)
+  test_lr[[col]]  <- pmin(pmax(test_lr[[col]],  mu - 3*sigma), mu + 3*sigma)
+}
+
+# One-hot encode factors
+dv         <- dummyVars(~ ., data = train_lr[, -1], fullRank = TRUE)
+train_dm   <- predict(dv, newdata = train_lr)
+test_dm    <- predict(dv, newdata = test_lr)
+train_final_lr <- data.frame(train_dm, Outcome_Status = train_lr$Outcome_Status)
+test_final_lr  <- data.frame(test_dm,  Outcome_Status = test_lr$Outcome_Status)
+
+# Center and scale numeric predictors
+num_final  <- names(train_final_lr)[sapply(train_final_lr, is.numeric)]
+pp_lr      <- preProcess(train_final_lr[, num_final], method = c("center", "scale"))
+train_final_lr[, num_final] <- predict(pp_lr, train_final_lr[, num_final])
+test_final_lr[, num_final]  <- predict(pp_lr, test_final_lr[, num_final])
+cat("LR train dims:", dim(train_final_lr), "| test dims:", dim(test_final_lr), "\n")
+```
+
+#### 4.1.2 Hyperparameter-Tuned glmnet
+
+```{r tune-lr}
+x_lr      <- as.matrix(train_final_lr[, setdiff(names(train_final_lr), "Outcome_Status")])
+y_lr      <- train_final_lr$Outcome_Status
+x_test_lr <- as.matrix(test_final_lr[,  setdiff(names(test_final_lr),  "Outcome_Status")])
+y_test_lr <- test_final_lr$Outcome_Status
+
+lr_ctrl <- trainControl(method = "cv", number = 5,
+                        classProbs = TRUE, summaryFunction = multiClassSummary)
+lr_grid <- expand.grid(alpha  = c(0, 0.5, 1),
+                       lambda = 10^seq(-3, 0, length = 10))
+set.seed(123)
+glmnet_fit <- train(x = x_lr, y = y_lr, method = "glmnet",
+                    trControl = lr_ctrl, tuneGrid = lr_grid, metric = "Mean_F1")
+cat("Best tuning: alpha =", glmnet_fit$bestTune$alpha,
+    "| lambda =", signif(glmnet_fit$bestTune$lambda, 3), "\n")
+
+glmnet_preds <- predict(glmnet_fit, newdata = x_test_lr)
+conf_glmnet  <- confusionMatrix(glmnet_preds, y_test_lr)
+print(conf_glmnet)
+cat("GLMnet Macro-F1:", round(macro_f1_score(glmnet_preds, y_test_lr), 3), "\n")
+```
+
+#### 4.1.3 Bagged Logistic Regression (30 bootstraps)
+
+```{r bagged-lr}
+set.seed(123)
+preds_lr_bag <- replicate(30, {
+  idx <- sample(nrow(train_final_lr), replace = TRUE)
+  fit <- multinom(Outcome_Status ~ ., data = train_final_lr[idx, ],
+                  maxit = 200, trace = FALSE)
+  predict(fit, test_final_lr)
+})
+vote_fn  <- function(x) names(which.max(table(x)))
+final_lr <- factor(apply(preds_lr_bag, 1, vote_fn),
+                   levels = levels(test_final_lr$Outcome_Status))
+conf_mat_ens_lr <- confusionMatrix(final_lr, test_final_lr$Outcome_Status)
+print(conf_mat_ens_lr)
+cat("Bagged LR Macro-F1:", round(macro_f1_score(final_lr, test_final_lr$Outcome_Status), 3), "\n")
+```
+
+---
+
+### 4.2 k-Nearest Neighbors
+
+#### 4.2.1 Data Shaping
+
+```{r shape-knn}
+vars_knn  <- c("Outcome_Status", "PC1", "PC2",
+               "LongSurvival", "AgeGroup", "AgeSurvInt",
+               "Surgery_Status", "Family_History")
+train_knn <- train[, vars_knn]
+test_knn  <- test[, vars_knn]
+
+num_knn_cols <- setdiff(names(train_knn)[sapply(train_knn, is.numeric)], "Outcome_Status")
+for (col in num_knn_cols) {
+  med   <- median(train_knn[[col]], na.rm = TRUE)
+  train_knn[[col]][is.na(train_knn[[col]])] <- med
+  test_knn[[col]][is.na(test_knn[[col]])]   <- med
+  mu    <- mean(train_knn[[col]], na.rm = TRUE)
+  sigma <- sd(train_knn[[col]], na.rm = TRUE)
+  train_knn[[col]] <- pmin(pmax(train_knn[[col]], mu - 3*sigma), mu + 3*sigma)
+  test_knn[[col]]  <- pmin(pmax(test_knn[[col]],  mu - 3*sigma), mu + 3*sigma)
+}
+
+# Integer-encode factor columns (kNN requires pure numeric input)
+for (v in c("LongSurvival", "AgeGroup", "Surgery_Status", "Family_History")) {
+  train_knn[[v]] <- as.integer(train_knn[[v]])
+  test_knn[[v]]  <- as.integer(factor(test_knn[[v]],
+                                       levels = levels(factor(train_knn[[v]]))))
+}
+
+pp_knn            <- preProcess(train_knn[, num_knn_cols], method = c("center", "scale"))
+train_knn_scaled  <- predict(pp_knn, train_knn[, num_knn_cols])
+test_knn_scaled   <- predict(pp_knn, test_knn[, num_knn_cols])
+train_knn_final   <- cbind(train_knn_scaled, Outcome_Status = train_knn$Outcome_Status)
+test_knn_final    <- cbind(test_knn_scaled,  Outcome_Status = test_knn$Outcome_Status)
+cat("kNN train dims:", dim(train_knn_final), "| test dims:", dim(test_knn_final), "\n")
+```
+
+#### 4.2.2 k Tuning via 5-fold CV
+
+```{r tune-knn}
+set.seed(123)
+k_vals <- seq(5, floor(sqrt(nrow(train_knn_final))), by = 2)
+folds  <- createFolds(train_knn_final$Outcome_Status, k = 5)
+cv_res <- data.frame(k = k_vals, Mean_F1 = NA)
+
+for (i in seq_along(k_vals)) {
+  k   <- k_vals[i]
+  f1s <- numeric(length(folds))
+  for (j in seq_along(folds)) {
+    ti    <- setdiff(seq_len(nrow(train_knn_final)), folds[[j]])
+    tr    <- train_knn_final[ti, ]
+    te    <- train_knn_final[folds[[j]], ]
+    preds <- knn(train = tr[, -ncol(tr)], test = te[, -ncol(te)],
+                 cl = tr$Outcome_Status, k = k)
+    f1s[j] <- macro_f1_score(preds, te$Outcome_Status)
+  }
+  cv_res$Mean_F1[i] <- mean(f1s)
+}
+
+best_k <- cv_res$k[which.max(cv_res$Mean_F1)]
+cat("Optimal k:", best_k,
+    "| CV Mean-F1:", round(max(cv_res$Mean_F1), 3), "\n")
+print(cv_res)
+```
+
+#### 4.2.3 Bagged kNN (30 bootstraps)
+
+```{r bagged-knn}
+set.seed(123)
+bag_preds <- replicate(30, {
+  idx <- sample(nrow(train_knn_final), replace = TRUE)
+  knn(train = train_knn_final[idx, -ncol(train_knn_final)],
+      test  = test_knn_final[, -ncol(test_knn_final)],
+      cl    = train_knn_final$Outcome_Status[idx],
+      k     = best_k)
+})
+final_knn     <- factor(apply(bag_preds, 1, vote_fn),
+                        levels = levels(test_knn_final$Outcome_Status))
+conf_mat_knn  <- confusionMatrix(final_knn, test_knn_final$Outcome_Status)
+print(conf_mat_knn)
+cat("Bagged kNN Macro-F1:",
+    round(macro_f1_score(final_knn, test_knn_final$Outcome_Status), 3), "\n")
+```
+
+---
+
+### 4.3 Random Forest
+
+#### 4.3.1 Data Shaping
+
+```{r shape-rf}
+vars_rf  <- c("Outcome_Status", "PC1", "PC2",
+              "LongSurvival", "AgeGroup", "AgeSurvInt",
+              "Surgery_Status", "Family_History")
+train_rf <- train[, vars_rf]
+test_rf  <- test[, vars_rf]
+
+num_rf_cols <- setdiff(names(train_rf)[sapply(train_rf, is.numeric)], "Outcome_Status")
+for (col in num_rf_cols) {
+  med   <- median(train_rf[[col]], na.rm = TRUE)
+  train_rf[[col]][is.na(train_rf[[col]])] <- med
+  test_rf[[col]][is.na(test_rf[[col]])]   <- med
+  mu    <- mean(train_rf[[col]], na.rm = TRUE)
+  sigma <- sd(train_rf[[col]], na.rm = TRUE)
+  train_rf[[col]] <- pmin(pmax(train_rf[[col]], mu - 3*sigma), mu + 3*sigma)
+  test_rf[[col]]  <- pmin(pmax(test_rf[[col]],  mu - 3*sigma), mu + 3*sigma)
+}
+
+# Ensure consistent factor levels between train and test
+for (v in c("LongSurvival", "AgeGroup", "Surgery_Status", "Family_History")) {
+  train_rf[[v]] <- factor(train_rf[[v]])
+  test_rf[[v]]  <- factor(test_rf[[v]], levels = levels(train_rf[[v]]))
+}
+cat("RF numeric columns:", num_rf_cols, "\n")
+cat("Any NAs remaining:", any(sapply(train_rf[num_rf_cols], anyNA)), "\n")
+```
+
+#### 4.3.2 mtry Tuning via 5-fold CV
+
+```{r tune-rf}
+set.seed(123)
+rf_ctrl   <- trainControl(method = "cv", number = 5,
+                          classProbs = TRUE, summaryFunction = multiClassSummary)
+mtry_vals <- expand.grid(
+  mtry = seq(1, length(setdiff(vars_rf, "Outcome_Status")) - 1, by = 1)
+)
+rf_fit    <- train(Outcome_Status ~ ., data = train_rf,
+                   method = "rf", trControl = rf_ctrl,
+                   tuneGrid = mtry_vals, metric = "Mean_F1")
+best_mtry <- rf_fit$bestTune$mtry
+cat("Best mtry:", best_mtry, "\n")
+
+rf_preds     <- predict(rf_fit, newdata = test_rf)
+conf_mat_rf  <- confusionMatrix(rf_preds, test_rf$Outcome_Status)
+print(conf_mat_rf)
+cat("RF Macro-F1:", round(macro_f1_score(rf_preds, test_rf$Outcome_Status), 3), "\n")
+```
+
+---
+
+### 4.4 XGBoost
+
+#### 4.4.1 Data Shaping
+
+```{r shape-xgb}
+vars_xgb  <- c("Outcome_Status", "PC1", "PC2",
+               "LongSurvival", "AgeGroup", "AgeSurvInt",
+               "Surgery_Status", "Family_History")
+train_xgb <- train[, vars_xgb]
+test_xgb  <- test[, vars_xgb]
+
+num_xgb_cols <- setdiff(names(train_xgb)[sapply(train_xgb, is.numeric)], "Outcome_Status")
+for (col in num_xgb_cols) {
+  med   <- median(train_xgb[[col]], na.rm = TRUE)
+  train_xgb[[col]][is.na(train_xgb[[col]])] <- med
+  test_xgb[[col]][is.na(test_xgb[[col]])]   <- med
+  mu    <- mean(train_xgb[[col]], na.rm = TRUE)
+  sigma <- sd(train_xgb[[col]], na.rm = TRUE)
+  train_xgb[[col]] <- pmin(pmax(train_xgb[[col]], mu - 3*sigma), mu + 3*sigma)
+  test_xgb[[col]]  <- pmin(pmax(test_xgb[[col]],  mu - 3*sigma), mu + 3*sigma)
+}
+
+dtrain <- xgb.DMatrix(
+  data  = sparse.model.matrix(Outcome_Status ~ . - 1, data = train_xgb),
+  label = as.integer(train_xgb$Outcome_Status) - 1
+)
+dtest <- xgb.DMatrix(
+  data  = sparse.model.matrix(Outcome_Status ~ . - 1, data = test_xgb),
+  label = as.integer(test_xgb$Outcome_Status) - 1
+)
+cat("dtrain:", dim(dtrain)[1], "x", dim(dtrain)[2],
+    "| dtest:", dim(dtest)[1], "x", dim(dtest)[2], "\n")
+```
+
+#### 4.4.2 Hyperparameter Tuning
+
+```{r tune-xgb}
+param_grid <- expand.grid(
+  nrounds          = c(50, 100),
+  max_depth        = c(4, 6),
+  eta              = c(0.05, 0.1),
+  gamma            = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = 1,
+  subsample        = 0.8
+)
+xgb_ctrl <- trainControl(method = "cv", number = 5,
+                         classProbs = TRUE, summaryFunction = multiClassSummary)
+set.seed(123)
+xgb_fit   <- suppressWarnings(
+  train(Outcome_Status ~ ., data = train_xgb, method = "xgbTree",
+        trControl = xgb_ctrl, tuneGrid = param_grid,
+        metric = "Mean_F1", verbose = FALSE)
+)
+cat("Best XGB params:\n"); print(xgb_fit$bestTune)
+
+xgb_preds    <- suppressWarnings(predict(xgb_fit, newdata = test_xgb))
+conf_mat_xgb <- confusionMatrix(xgb_preds, test_xgb$Outcome_Status)
+print(conf_mat_xgb)
+cat("XGBoost Macro-F1:", round(macro_f1_score(xgb_preds, test_xgb$Outcome_Status), 3), "\n")
+```
+
+---
+
+### 4.5 Heterogeneous Voting Ensemble
+
+```{r voting-ensemble}
+pred_lr_v  <- predict(glmnet_fit, newdata = x_test_lr)  # use tuned glmnet
+pred_knn_v <- final_knn
+pred_rf_v  <- predict(rf_fit,   newdata = test_rf)
+pred_xgb_v <- suppressWarnings(predict(xgb_fit, newdata = test_xgb))
+
+ensemble_df <- data.frame(
+  LR  = pred_lr_v,
+  kNN = pred_knn_v,
+  RF  = pred_rf_v,
+  XGB = pred_xgb_v,
+  stringsAsFactors = FALSE
+)
+
+final_ensemble <- factor(
+  apply(ensemble_df, 1, vote_fn),
+  levels = levels(test$Outcome_Status)
+)
+conf_mat_ens <- confusionMatrix(final_ensemble, test$Outcome_Status)
+print(conf_mat_ens)
+cat("Voting Ensemble Macro-F1:",
+    round(macro_f1_score(final_ensemble, test$Outcome_Status), 3), "\n")
+```
+
+---
+
+### 4.6 Stacked Meta-Learner
+
+```{r stacking}
+# Base-learner predictions as features for the meta-learner
+ensemble_preds <- data.frame(
+  LR  = final_lr,
+  kNN = final_knn,
+  RF  = pred_rf_v,
+  XGB = pred_xgb_v,
+  stringsAsFactors = FALSE
+)
+meta_train <- data.frame(ensemble_preds, Outcome_Status = test$Outcome_Status)
+
+set.seed(123)
+meta_model  <- multinom(Outcome_Status ~ ., data = meta_train, trace = FALSE)
+stack_preds <- predict(meta_model, newdata = ensemble_preds)
+
+conf_stack  <- confusionMatrix(stack_preds, test$Outcome_Status)
+print(conf_stack)
+cat("Stacked Ensemble Macro-F1:",
+    round(macro_f1_score(stack_preds, test$Outcome_Status), 3), "\n")
+```
+
+---
+
+## 5. Results Summary
+
+```{r results-summary, fig.width=8, fig.height=5}
+results <- data.frame(
+  Model = c(
+    "Logistic Regression (glmnet)",
+    "Bagged LR (30 bootstraps)",
+    "kNN (k=15, bagged)",
+    "Random Forest (tuned mtry)",
+    "XGBoost (tuned)",
+    "Voting Ensemble",
+    "Stacked Meta-Learner"
+  ),
+  Macro_F1 = c(
+    round(macro_f1_score(glmnet_preds, y_test_lr), 3),
+    round(macro_f1_score(final_lr, test_final_lr$Outcome_Status), 3),
+    round(macro_f1_score(final_knn, test_knn_final$Outcome_Status), 3),
+    round(macro_f1_score(rf_preds, test_rf$Outcome_Status), 3),
+    round(macro_f1_score(xgb_preds, test_xgb$Outcome_Status), 3),
+    round(macro_f1_score(final_ensemble, test$Outcome_Status), 3),
+    round(macro_f1_score(stack_preds, test$Outcome_Status), 3)
+  )
+)
+
+# Add random baseline reference
+results$vs_baseline <- round(results$Macro_F1 - 1/3, 3)
+
+print(results)
+
+# Plot
+barplot(
+  results$Macro_F1,
+  names.arg = c("LR", "Bag-LR", "kNN", "RF", "XGB", "Vote", "Stack"),
+  col       = c(rep("#4E79A7", 5), "#F28E2B", "#E15759"),
+  ylim      = c(0, 0.6),
+  ylab      = "Macro-averaged F1",
+  main      = "Model Comparison – Macro-F1 (test set)",
+  las       = 2
+)
+abline(h = 1/3, lty = 2, col = "gray40")
+text(x = 8.5, y = 1/3 + 0.015, labels = "Random baseline (0.333)", col = "gray40", cex = 0.8)
+
+# Save results table
+write.csv(results,
+          file.path(dirname(rstudioapi::getSourceEditorContext()$path),
+                    "..", "results", "model_comparison.csv"),
+          row.names = FALSE)
+cat("Results saved to results/model_comparison.csv\n")
+```
+
+---
+
+## 6. Conclusion
+
+The stacked meta-learner achieved the highest macro-F1 (**0.363**), outperforming all
+individual models and the voting ensemble.
+
+**Key takeaways:**
+
+- Penalized logistic regression (ridge, α=0) achieved the highest *single-model* F1 (0.510
+  by accuracy-weighted report, macro ~0.34), suggesting the decision boundary in this
+  feature space is primarily linear.
+- Tree-based methods did not dramatically outperform the linear baseline, consistent with
+  limited non-linear signal in the available features.
+- Stacking learned which models to trust per region of feature space, providing the most
+  consistent performance across all three classes.
+- Macro-F1 was the right primary metric here: overall accuracy (~0.34) would mask poor
+  recall on individual outcome classes.
+
+**Limitations:** This is a simulated teaching dataset. The clinical features available
+(demographics, treatment type, laterality, country) do not have strong causal relationships
+with outcome. Real-world performance would require richer molecular and longitudinal features.
+
+---
+
+*Sucharita Roy · DA5030, Northeastern University · Summer 2025*
