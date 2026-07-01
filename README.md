@@ -24,7 +24,7 @@ Predicting clinical outcomes (**Active · In Remission · Deceased**) in eye can
 
 ## Project Overview
 
-This project was completed as the signature term project for **DA5030 – Data Mining & Machine Learning** at Northeastern University (Summer 2025). It implements a full CRISP-DM pipeline to predict three-class patient outcomes for eye cancer (Retinoblastoma, Melanoma, Lymphoma) using clinical and demographic features.
+This project was completed as the signature term project during my studies (MS in bioinformatics) at Northeastern University. It implements a full CRISP-DM pipeline to predict three-class patient outcomes for eye cancer (Retinoblastoma, Melanoma, Lymphoma) using clinical and demographic features.
 
 **Clinical motivation:** Accurate outcome prediction across Active/In Remission/Deceased classes can inform follow-up scheduling, resource allocation, and treatment planning — but only if the model performs equally well across all three classes, not just the majority. This is why macro-averaged F1 was used as the primary metric throughout.
 
@@ -202,4 +202,4 @@ The voting ensemble treats all four models equally. The stacked meta-learner lea
 M.S. Bioinformatics, Northeastern University (Expected May 2027)
 [LinkedIn](https://linkedin.com/in/sucharita-roy) · [GitHub](https://github.com/sucharita-roy)
 
-*Course: DA5030 – Data Mining & Machine Learning, Full Summer Semester 2025*
+
