@@ -1,205 +1,117 @@
-# Eye Cancer Outcome Prediction · Ensemble Machine Learning
+# Eye cancer outcome classification
 
-![R](https://img.shields.io/badge/Language-R-276DC3?logo=r&logoColor=white)
-![ML](https://img.shields.io/badge/Task-Multiclass%20Classification-brightgreen)
-![Dataset](https://img.shields.io/badge/Dataset-5%2C000%20patients-blue)
-![Status](https://img.shields.io/badge/Status-Complete-success)
+A CRISP-DM course project comparing four classifiers and their ensembles on a
+5,000-record teaching dataset. The original notebook describes the dataset as
+simulated; this is an educational modeling exercise, not a validated clinical
+prediction system.
 
-Predicting clinical outcomes (**Active · In Remission · Deceased**) in eye cancer patients using a full ensemble machine learning pipeline in R — from raw data to stacked meta-learner.
+The corrected analysis uses a shared stratified 70/30 split, training-only
+preprocessing and cross-validation, homogeneous bootstrap ensembles for every
+algorithm, heterogeneous soft voting, and a stack trained on out-of-fold training
+predictions. No test labels are used for tuning or ensemble training.
 
----
+## Read the analysis
 
-## Table of Contents
-- [Project Overview](#project-overview)
-- [Dataset](#dataset)
-- [Pipeline Summary](#pipeline-summary)
-- [Results](#results)
-- [Repository Structure](#repository-structure)
-- [How to Reproduce](#how-to-reproduce)
-- [Key Design Decisions](#key-design-decisions)
-- [Limitations & Future Work](#limitations--future-work)
-- [Author](#author)
+- [R Notebook with explanations and code](src/RoyS_DA5030_EyeCancerML.Rmd)
+- [Rendered full analysis](docs/report.html)
+- [Full held-out results](results/full/model_comparison.csv)
+- [Per-class metrics](results/full/per_class_metrics.csv)
+- [Pipeline and assignment mapping](docs/pipeline_diagram.md)
 
----
+The full-run CSV and rendered report are the current results. Earlier values in
+Git history were retired because their stacking evaluation and metric reporting
+were unreliable. Smoke outputs are validation artifacts, not final performance.
 
-## Project Overview
+## Corrected full-run finding
 
-This project was completed as the signature term project during my studies (MS in bioinformatics) at Northeastern University. It implements a full CRISP-DM pipeline to predict three-class patient outcomes for eye cancer (Retinoblastoma, Melanoma, Lymphoma) using clinical and demographic features.
+The bagged random forest has the highest macro-F1 among trained models (0.340),
+while the stratified-random baseline scores 0.342. Corrected stacking scores
+0.252. None of the trained models exceeds the random baseline on this split.
+These results provide no evidence of useful patient-specific prediction in this
+teaching exercise; the project demonstrates the modeling and evaluation process.
+The full output table reports accuracy and class-sensitive metrics for every model.
 
-**Clinical motivation:** Accurate outcome prediction across Active/In Remission/Deceased classes can inform follow-up scheduling, resource allocation, and treatment planning — but only if the model performs equally well across all three classes, not just the majority. This is why macro-averaged F1 was used as the primary metric throughout.
+## Models and data shaping
 
----
-
-## Dataset
-
-| Property | Value |
-|---|---|
-| Source | [Kaggle – Eye Cancer Patient Records](https://www.kaggle.com/datasets/ak0212/eye-cancer-patient-records) |
-| Patients | 5,000 |
-| Features | 16 (clinical, demographic, treatment) |
-| Target | `Outcome_Status` (3 classes) |
-| Missing data | `Genetic_Markers` only (~50%) |
-| License | Public / Kaggle open dataset |
-
-**Feature overview:**
-
-| Feature | Type | Description |
+| Learner | Representation | Tuning |
 |---|---|---|
-| Age | Numeric | Patient age (range: 1–90, mean: 45) |
-| Gender | Categorical | M / F / Other |
-| Cancer_Type | Categorical | Retinoblastoma, Melanoma, Lymphoma |
-| Stage_at_Diagnosis | Ordinal | Stage I–IV |
-| Treatment_Type | Categorical | Surgery, Chemotherapy, Radiation |
-| Surgery_Status | Boolean | Whether surgery was performed |
-| Radiation_Therapy | Numeric | Radiation sessions |
-| Chemotherapy | Numeric | Chemotherapy cycles |
-| Survival_Time_Months | Numeric | Follow-up duration (1–120 months) |
-| Genetic_Markers | Categorical | BRAF Mutation or absent (~50% missing) |
-| Family_History | Boolean | Family history of cancer |
-| Country | Categorical | 10 countries |
-| Laterality | Categorical | Left / Right / Bilateral |
+| Multinomial logistic regression (`nnet`) | One-hot categories and scaled numeric matrix | Decay penalty |
+| kNN | One-hot categories and scaled numeric matrix | Neighbor count |
+| Random forest | Imputed numeric columns and categorical factors | Features per split |
+| XGBoost | One-hot numeric matrix, without scaling | Depth and learning rate |
 
-**Class distribution (balanced by design):**
+Random-forest trees have a fixed minimum terminal-node size of 10 and at most
+64 terminal nodes; these limits are set before test evaluation.
 
-| Outcome | Count | % |
-|---|---|---|
-| Active | 1,615 | 32.3% |
-| In Remission | 1,675 | 33.5% |
-| Deceased | 1,710 | 34.2% |
+Every training fold fits its own imputation, category mapping, zero-variance
+filter, and scaling. The same applies to each bootstrap replica. Logistic
+regression uses the same regularized implementation for both the individual and
+bagged model. PCA was removed rather than reused from the old pre-split fit.
 
-> **Note on F1 scores:** The balanced class distribution and the limited discriminative power of available features (demographics and treatment type do not strongly predict outcome in this dataset) mean that F1 scores in the 0.31–0.36 range are expected — a random baseline on a balanced 3-class problem scores ~0.33. The value of this project lies in the pipeline methodology, not the absolute metric value.
+The full experiment fits 30 stratified bootstrap replicas per algorithm. Outer
+bagging of random forests is redundant with their internal bootstrap trees but
+included to make the assignment's per-algorithm homogeneous-ensemble requirement
+explicit. XGBoost supplies boosting. Soft voting averages the four bagged models;
+the separate stack uses training-only OOF probabilities from four unbagged models.
 
----
-
-## Pipeline Summary
-
-```
-Raw CSV
-  └─ Data cleaning & type casting
-      └─ Exploratory data analysis (correlation, chi-squared)
-          └─ Feature engineering
-          │    ├─ PCA (PC1, PC2 — top 2 components)
-          │    ├─ LongSurvival flag (above median survival)
-          │    ├─ AgeGroup bins (Young / Middle / Senior)
-          │    └─ AgeSurvInt (Age × Survival interaction)
-          └─ Per-model data shaping
-               ├─ Median imputation + ±3σ outlier capping
-               └─ Model-specific encoding (dummy / scaled / factor)
-
-Modeling (stratified 70/30 split, 5-fold CV, macro-F1 objective)
-  ├─ 4.1 Penalized Multinomial Logistic Regression (glmnet)
-  │    └─ Bagged ensemble (30 bootstraps)
-  ├─ 4.2 k-Nearest Neighbors (tuned k=15)
-  │    └─ Bagged ensemble (30 bootstraps)
-  ├─ 4.3 Random Forest (tuned mtry)
-  └─ 4.4 XGBoost (tuned nrounds, max_depth, eta)
-
-Ensemble
-  ├─ 4.5 Heterogeneous voting ensemble (majority vote, 4 models)
-  └─ 4.6 Stacked meta-learner (multinomial logit on base predictions)
-```
-
----
-
-## Results
-
-| Model | Macro-F1 | Accuracy | Notes |
-|---|---|---|---|
-| Logistic Regression (glmnet) | 0.510 | 0.342 | α=0, λ≈0.022 |
-| Bagged LR | ~0.51 | ~0.34 | 30 bootstraps |
-| kNN (k=15, bagged) | 0.309 | 0.315 | 30 bootstraps |
-| Random Forest (mtry=3) | 0.312 | — | 5-fold CV tuned |
-| XGBoost | 0.328 | — | nrounds=100, depth=6, η=0.05 |
-| Voting Ensemble | 0.313 | — | 4-model majority vote |
-| **Stacked Ensemble** | **0.363** | — | **Best overall** |
-
-**Key finding:** The stacked meta-learner outperforms all individual models. Penalized logistic regression (ridge, α=0) achieved the highest single-model macro-F1, suggesting that the decision boundary in this feature space is largely linear. Tree-based methods (RF, XGBoost) did not dramatically outperform the linear baseline — consistent with the limited non-linear signal in the dataset's available features.
-
----
-
-## Repository Structure
-
-```
-eye-cancer-ml/
-├── README.md                          # This file
-├── environment/
-│   ├── environment.yml                # Conda environment (R + packages)
-│   └── requirements.R                 # R package install script
-├── data/
-│   └── eye_cancer_patients.csv        # Full dataset (5,000 patients)
-├── src/
-│   └── RoyS_DA5030_EyeCancerML.Rmd   # Full analysis — run this
-├── results/
-│   └── model_comparison.csv           # Summary metrics table
-├── docs/
-│   └── pipeline_diagram.md            # Annotated pipeline description
-└── .gitignore
-```
-
----
-
-## How to Reproduce
-
-### Option A — Conda (recommended)
+## Reproduce
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/sucharita-roy/eye-cancer-ml.git
+git clone https://github.com/sucharitaroy723/eye-cancer-ml.git
 cd eye-cancer-ml
-
-# 2. Create and activate the environment
 conda env create -f environment/environment.yml
 conda activate eye-cancer-ml
-
-# 3. Open RStudio and knit the Rmd
-#    File → Open → src/RoyS_DA5030_EyeCancerML.Rmd → Knit
+Rscript tests/test_pipeline.R
+Rscript scripts/run_analysis.R --smoke
+Rscript scripts/run_analysis.R
+Rscript -e 'rmarkdown::render("src/RoyS_DA5030_EyeCancerML.Rmd", output_file="report.html", output_dir="docs")'
 ```
 
-### Option B — R only
+The environment pins R 4.3.3 and XGBoost 1.7.7.1. Alternatively, with a compatible
+current R installation, explicitly run `Rscript environment/requirements.R`.
+The analysis does not install packages automatically. You can also open and knit
+the notebook in RStudio; no active source-editor API is needed.
+
+To render the report after running the CLI without refitting all models:
 
 ```r
-# Run this once in your R console to install all required packages
-source("environment/requirements.R")
-
-# Then open and knit:
-# src/RoyS_DA5030_EyeCancerML.Rmd
+rmarkdown::render(
+  "src/RoyS_DA5030_EyeCancerML.Rmd",
+  output_file = "report.html", output_dir = "docs",
+  params = list(smoke = FALSE, rerun = FALSE)
+)
 ```
 
-### Expected runtime
-~10–20 minutes on a standard laptop (dominated by 5-fold CV for RF and XGBoost).
+This checks saved data/code fingerprints. The CLI's local `analysis.rds` is not
+tracked; regenerate it before using `rerun = FALSE` on a fresh checkout.
 
----
+Each output directory has a run-status marker, split assignments, tuning tables,
+held-out predictions and probabilities, aggregate and per-class metrics, a run
+configuration, and package session information. Interpret outputs only when
+`run_status.txt` says `COMPLETE`. The full and smoke runs use separate directories.
 
-## Key Design Decisions
+## Scope and limitations
 
-**Why macro-averaged F1 as the metric?**
-With three near-equal classes (~33% each), accuracy is insufficient — a model predicting only "Deceased" would score 34% accuracy while being clinically useless for Active and In Remission patients. Macro-F1 gives equal weight to all three classes.
+- Source listing: [Kaggle Eye Cancer Patient Records](https://www.kaggle.com/datasets/ak0212/eye-cancer-patient-records).
+  Confirm the source's provenance and license terms before reuse. Public access
+  is not itself a license. Dataset approval must be confirmed from course records.
+- The target is recorded outcome status, not a defined time-to-event endpoint.
+  Survival duration and treatment variables are excluded because their timing is
+  not established. There is no claim of a validated prediction-at-diagnosis model.
+- Literal `None` marker values are retained as a recorded category, not silently
+  treated as missing. A data dictionary is needed for biological interpretation.
+- One held-out split provides a descriptive comparison. No ensemble is assumed to
+  win, and the highest observed test score is not proof of statistical superiority.
+- Majority and stratified-random baselines use training class counts. No clinical
+  usefulness, external validation, or fairness across subgroups is established.
 
-**Why independent data shaping pipelines per model?**
-Each algorithm has different requirements: logistic regression needs centering/scaling and one-hot encoding; kNN needs numeric-only integer-coded features; RF handles factors natively; XGBoost requires sparse matrices. Using a single shared preprocessing step would force compromises that hurt at least one model.
+## Files
 
-**Why bagging for LR and kNN but not RF/XGBoost?**
-RF and XGBoost already include internal bootstrapping/subsampling as part of their algorithms. Bagging LR and kNN provides the variance reduction those methods lack natively.
+- `src/ml_pipeline.R`: preprocessing, models, tuning, ensembles, metrics and exports.
+- `src/RoyS_DA5030_EyeCancerML.Rmd`: narrated notebook, method code and interpretation.
+- `scripts/run_analysis.R`: reproducible command-line entry point.
+- `tests/test_pipeline.R`: targeted regression checks for the corrected behavior.
+- `results/full/`: full-data held-out outputs; `results/smoke/`: small-run validation.
+- `docs/report.html`: rendered notebook with full results.
 
-**Why stacking over voting?**
-The voting ensemble treats all four models equally. The stacked meta-learner learns which models to trust more in each region of feature space — for example, favoring LR for linear patterns and RF for interaction effects.
-
----
-
-## Limitations & Future Work
-
-- **Feature scope:** Country, laterality, and gender have low discriminative power for outcome prediction. Tumor size, histology, and molecular markers (when available) would likely drive stronger signal.
-- **Genetic_Markers missingness:** ~50% of this column is absent. A dedicated imputation strategy or a missingness indicator feature may help.
-- **SMOTE / class weighting:** Despite near-balanced classes, per-class recall varied. Oversampling minority errors could improve consistency.
-- **External validation:** The pipeline should be tested on an independent cohort to assess generalizability.
-- **Interpretability:** Adding SHAP value analysis (via `shapr` or `iml`) would make predictions explainable for clinical stakeholders.
-
----
-
-## Author
-
-**Sucharita Roy**
-M.S. Bioinformatics, Northeastern University (Expected May 2027)
-[LinkedIn](https://linkedin.com/in/sucharita-roy) · [GitHub](https://github.com/sucharita-roy)
-
-
+Sucharita Roy · M.S. Bioinformatics, Northeastern University · Expected December 2026
