@@ -1,8 +1,0 @@
-Model,Macro_F1,vs_baseline
-Logistic Regression (glmnet),0.51,0.177
-Bagged LR (30 bootstraps),0.51,0.177
-kNN (k=15 bagged),0.309,-0.024
-Random Forest (tuned mtry),0.312,-0.021
-XGBoost (tuned),0.328,-0.005
-Voting Ensemble,0.313,-0.020
-Stacked Meta-Learner,0.363,0.030

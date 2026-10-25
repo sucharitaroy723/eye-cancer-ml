@@ -1,0 +1,5 @@
+.Rhistory
+.RData
+.Rproj.user/
+results/*/analysis.rds
+src/*.html
